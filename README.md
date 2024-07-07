@@ -86,10 +86,10 @@ public:
         }
         // 必须，保留所有更改
         return PreservedAnalyses::all();
-        
-        static void rename_function(CallInst& inst);
-        static void set_called_function(CallInst& inst, std::string& name);
     }
+
+    static void rename_function(CallInst& inst);
+    static void set_called_function(CallInst& inst, std::string& name);
 };
 
 void BofRenameFuncPass::rename_function(CallInst& inst)
@@ -192,14 +192,17 @@ clang -fplugin=pass.dll -fpass-plugin=pass.dll -mllvm -bl=c:/msys64/clang64/lib 
 
 ### 5. 参数传递
 
-也是坑，以后再谈
+~~也是坑，以后再谈~~  
+查看LLVM源码可知，NewPassManager加载PASS动态库的时机在参数解析之后，故此无法正常传入自定义的命令行参数。那么解决办法也很简单，让PASS动态库在PassManager初始化之前加载就行了。
+这里我用Clang动态加载插件的功能来实现提前加载，怎么做呢，只需要在Clang命令行添加`-fplugin=pass.dll`，是不是很方便？  
+其实我对LLVM Pass的了解仅限基本用法，不知道有没有比较“正经”的办法来实现参数传递，反正能用就成，实用为主！lol~
 
 ### 6. BUG与改进
 
 上面的流程看似美好，实则暗藏杀机，经过多次踩坑，总结以下问题：
 
-1. 编译32位时，stdcall的命名规范比较特殊，API以`_xxx@n`的规则生成，我们需要手动umangling
-2. IR经过优化会生成memcpy和memset函数，需要手动识别
+1. 编译32位时，stdcall的命名规范比较特殊，API以`_xxx@n`的规则生成，需要手动umangling；
+2. IR经过优化会生成memcpy和memset函数，需要识别并修改为`msvcrt$`的形式。
 
 ```c++
 if (cf_name.find("llvm.memcpy", 0, 11) == 0) {
@@ -223,7 +226,33 @@ else {
 }
 ```
 
-3. 编译时添加-Ox优化后，会生成带有SSE相关的指令，然而这些指令通常都是16字节对齐的，CS的BOF加载逻辑应该是没有考虑到这一问题，data段没有对齐导致BOF执行报错
+3. 编译时添加-Ox优化后，会生成SSE相关指令，然而通常这些指令要求操作地址按照16字节对齐，CS的BOF加载逻辑应该是没有考虑到这一问题，data段没有对齐导致BOF执行时进程崩溃。
+4. CS解析BOF的能力稍微差了点，没有实现对多个代码段、数据段的合并（只能加载.text .data .rdata，然而C++生成的obj文件通常包含多个区段），也没有对C++符号的解析能力。  
+   只能写C语言的BOF还是让人有那么一点不爽，所以我修改了一下BOF加载逻辑，允许在CS对BOF预加载时合并区段并解析C++符号，再写一个BOF基类用于实现一些常用的功能，简化BOF开发。
+   这样，新的BOF模板大概是这样：
+   ```c++
+   #include <beacon.h>
+
+   class TestBof : public bof
+   {
+   public:
+       void execute() override
+       {
+           int len = 0;
+           const auto pid = get_integer<DWORD>();
+           const auto payload = get_cstring(len);
+           if (len == 0) {
+               println("error wrong parameter");
+               return;
+           }
+
+            const auto process = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
+           // Inject payload into the target process......
+            CloseHandle(process);
+       }
+   };
+   ```
+   如果有时间再更新一点新的BOF加载的实现思路。
 
 ### 7. 参考链接
 
