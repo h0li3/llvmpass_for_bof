@@ -1,4 +1,19 @@
-## 在新的LLVM Pass管理器中使用Pass编译BOF源码
+## 壹、使用方法
+
+### 1. 工具链
+
+默认使用msys2中的`mingw-w64-clang-x86_64-toolchain`，配置好msys2后，执行`pacman -S mingw-w64-clang-x86_64-toolchain`安装。  
+
+### 2. Pass的参数
+
+在编译时给clang命令行添加参数：`-mllvm -bxxx`来传递参数给Pass，现在支持的参数如下：
+```
+-bren 启用函数重命名，相当于全局开关
+-bl   win32静态库的路径，msys2中一般是/clang64/lib或者c:/msys2/clang64/lib
+-bverbose 打印详细日志，如果出现某个函数未能成功重命名，请开启这个选项查看日志
+```
+
+## 贰、原理：在新的LLVM Pass管理器中使用Pass编译BOF源码
 
 ### 1. LLVM Pass介绍
 
@@ -228,31 +243,60 @@ else {
 
 3. 编译时添加-Ox优化后，会生成SSE相关指令，然而通常这些指令要求操作地址按照16字节对齐，CS的BOF加载逻辑应该是没有考虑到这一问题，data段没有对齐导致BOF执行时进程崩溃。
 4. CS解析BOF的能力稍微差了点，没有实现对多个代码段、数据段的合并（只能加载.text .data .rdata，然而C++生成的obj文件通常包含多个区段），也没有对C++符号的解析能力。  
-   只能写C语言的BOF还是让人有那么一点不爽，所以我修改了一下BOF加载逻辑，允许在CS对BOF预加载时合并区段并解析C++符号，再写一个BOF基类用于实现一些常用的功能，简化BOF开发。
-   这样，新的BOF模板大概是这样：
-   ```c++
-   #include <beacon.h>
+只能写C语言的BOF还是让人有那么一点不爽，所以我修改了一下BOF加载逻辑，允许在CS对BOF预加载时合并区段并解析C++符号，再写一个BOF基类用于实现一些常用的功能，简化BOF开发。  
+这样，新的BOF模板如下：
+```c++
+#include <beacon.h>
 
-   class TestBof : public bof
-   {
-   public:
-       void execute() override
-       {
-           int len = 0;
-           const auto pid = get_integer<DWORD>();
-           const auto payload = get_cstring(len);
-           if (len == 0) {
-               println("error wrong parameter");
-               return;
-           }
+// Macro for void go(...) defination.
+go(TestBof)
 
-            const auto process = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
-           // Inject payload into the target process......
-            CloseHandle(process);
-       }
-   };
-   ```
-   如果有时间再更新一点新的BOF加载的实现思路。
+class TestBof : public bof
+{
+public:
+    void execute() override
+    {
+        int len = 0;
+        const auto pid = get_integer<DWORD>();
+        const auto payload = get_cstring(len);
+        f (len == 0) {
+            println("error: wrong parameter");
+             return;
+        }
+
+        const auto process = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
+        // Inject payload into the target process......
+        CloseHandle(process);
+    }
+};
+
+```
+如果有时间再更新一点新的BOF加载的实现思路。
+
+5. 对STL容器的支持  
+最近想把某个项目转换成BOF来用，但是代码中用到了STL类型，改起来比较麻烦。考虑到STL的容器一般不会用到libc++之类的外部函数（可以被重载的new和delete不算），所以在BOF中使用STL也不是不行滴。  
+经过测试发现`std::string`的代码会生成对`memmove`函数的调用，故将其解析到`msvcrt$memmove`即可。  
+测试代码和结果：
+```c++
+class my_bof : public bof
+{
+public:
+    void execute() override
+    {
+        std::vector<std::string> test;
+        test.push_back("Hello!");
+        test.push_back("FooBar");
+        println("%zu %s", test.size(), test.front().c_str());
+        std::map<std::string, int> map;
+        map.emplace(test.back(), 2233);
+        for (auto& t : map) {
+            println("%s -> %d", t.first.c_str(), t.second);
+        }
+    }
+};
+```
+
+![image1](./image1.png)
 
 ### 7. 参考链接
 
