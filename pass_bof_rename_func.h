@@ -6,6 +6,7 @@
 #include <llvm/Support/MemoryBufferRef.h>
 #include <llvm/Object/Archive.h>
 #include <llvm/IR/GlobalValue.h>
+#include <clang/Frontend/FrontendPluginRegistry.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -13,7 +14,38 @@
 
 using namespace llvm;
 
-static cl::opt<std::string> lib_path("bl", cl::desc("static library path to load symbols"), cl::value_desc("path"), cl::init("/clang64/lib"), cl::Optional);
+const char* static_libs[] = {
+    "advapi32",
+    "cabinet",
+    "crypt32",
+    "gdi32",
+    "gdiplus",
+    "kernel32",
+    "msvcrt",
+    "msvcp60",
+    "mswsock",
+    "ntdll",
+    "ole32",
+    "oleaut32",
+    "rpcrt4",
+    "secur32",
+    "shell32",
+    "shlwapi",
+    "user32",
+    "winhttp",
+    "wininet",
+    "ws2_32",
+    nullptr,
+};
+
+struct BofPassOptions
+{
+    cl::opt<std::string> lib_path{"bl", cl::desc("static library path to load symbols"), cl::value_desc("library path"), cl::init("c:/msys64/clang64/lib"), cl::Optional};
+    cl::opt<bool> enable_rename{"bren", cl::desc("enable external functions renaming for BOF"), cl::value_desc("bool"), cl::Optional};
+    cl::opt<bool> enable_verbose{"bverbose", cl::desc("enable verbose mode"), cl::value_desc("bool"), cl::Optional};
+};
+
+extern BofPassOptions bof_options;
 
 class Library
 {
@@ -22,7 +54,7 @@ public:
     {
         auto E = archive_.findSym(func);
         if (!E) {
-            errs() << "failed to find symbol: " << toString(E.takeError()) << "\n";
+            errs() << "failed to find symbol: " << toString(E.takeError()) << '\n';
             return false;
         }
         return E->has_value();
@@ -30,11 +62,11 @@ public:
 
     static std::unique_ptr<Library> load(std::string const& lib_name)
     {
-        std::string path = lib_path + "/lib" + lib_name + ".a";
+        std::string path = bof_options.lib_path + "/lib" + lib_name + ".a";
 
         auto errOrBuf = MemoryBuffer::getFile(path);
         if (!errOrBuf) {
-            errs() << "failed to open " << path << ": " << errOrBuf.getError().message() << "\n";
+            errs() << "failed to open " << path << ": " << errOrBuf.getError().message() << '\n';
             return nullptr;
         }
 
@@ -43,11 +75,12 @@ public:
 
         auto library = new Library(std::move(buf), err);
         if (err) {
-            errs() << "failed to load " << path << ": " << err << "\n";
+            errs() << "failed to load " << path << ": " << err << '\n';
             return nullptr;
         }
 
-        // errs() << "symbols loaded from " << path << "\n";
+        if (bof_options.enable_verbose)
+            errs() << "symbols loaded from " << path << '\n';
         return std::unique_ptr<Library>(library);
     }
 
@@ -69,24 +102,15 @@ public:
         if (loaded_) {
             return;
         }
-        archive_loader.load_archive("advapi32");
-        archive_loader.load_archive("cabinet");
-        archive_loader.load_archive("crypt32");
-        archive_loader.load_archive("gdi32");
-        archive_loader.load_archive("gdiplus");
-        archive_loader.load_archive("kernel32");
-        archive_loader.load_archive("msvcrt");
-        archive_loader.load_archive("msvcp60");
-        archive_loader.load_archive("mswsock");
-        archive_loader.load_archive("ntdll");
-        archive_loader.load_archive("ole32");
-        archive_loader.load_archive("rpcrt4");
-        archive_loader.load_archive("secur32");
-        archive_loader.load_archive("shell32");
-        archive_loader.load_archive("user32");
-        archive_loader.load_archive("winhttp");
-        archive_loader.load_archive("wininet");
-        archive_loader.load_archive("ws2_32");
+
+        if (bof_options.enable_verbose) {
+            errs() << "[BOF] INFO - static library path: " << bof_options.lib_path << '\n';
+        }
+
+        for (int i = 0; static_libs[i]; ++i) {
+            archive_loader.load_archive(static_libs[i]);
+        }
+
         loaded_ = true;
     }
 
@@ -155,13 +179,13 @@ public:
         std::string new_func_name;
         std::string cf_name(CF->getName());
 
-        if (cf_name.find("llvm.memcpy", 0, 11) == 0) {
-            // errs() << "------- " << cf_name << "\n";
-        new_func_name = "msvcrt$memcpy";
-        }
-        else if (cf_name.find("llvm.memset", 0, 11) == 0) {
-            // errs() << "------- " << cf_name << "\n";
-        new_func_name = "msvcrt$memset";
+        if (cf_name.find("llvm.", 0, 5) == 0) {
+            new_func_name = rename_llvm_function(cf_name);
+            if (new_func_name.empty()) {
+                if (bof_options.enable_verbose)
+                    errs() << "[BOF] WARN - failed to resolve llvm function: " << cf_name << '\n';
+                return;
+            }
         }
         else {
             // Unmangle function name forcely
@@ -177,8 +201,27 @@ public:
             }
             new_func_name = formatv("{0}${1}", libname, cf_name);
         }
-        // errs() << "rename " << cf_name << " to " << new_func_name << "\n";
+
+        if (bof_options.enable_verbose)
+            errs() << "[BOF] INFO - renamed " << cf_name << " to " << new_func_name << '\n';
         set_called_function(inst, new_func_name);
+    }
+
+    static std::string rename_llvm_function(std::string const& name)
+    {
+        static std::array<std::string, 3> reserved_names = {
+            "memcpy",
+            "memset",
+            "memmove"
+        };
+
+        for (auto const& rn : reserved_names) {
+            if (name.find(rn, 5) == 5) {
+                return "msvcrt$" + rn;
+            }
+        }
+
+        return {};
     }
 
     static void set_called_function(CallInst& inst, std::string& name)
@@ -196,15 +239,3 @@ public:
 
     static bool isRequired() { return true; }
 };
-
-
-/*
-        if (!libs.empty()) {
-            for (auto& lib : libs) {
-                if (ArchiveLoader::get().load_archive(lib)) {
-                    errs() << "static library loaded " << lib << "\n";
-                }
-            }
-            libs.clear();
-        }
-        */
